@@ -1,9 +1,13 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "analyst-langgraph"
+name = "jevgraph"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.11"
 dependencies = [
     "dotenv==0.9.9",
     "langchain==1.4.1",
@@ -15,3 +19,6 @@ dependencies = [
     "typesafe-sdk",
     "typing-extensions>=4.16.0",
 ]
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -5,8 +5,9 @@ from types import SimpleNamespace
 
 class AnalystGraphTest(unittest.TestCase):
     def test_jev_routes_clarification(self):
-        module = import_module("analyst_langgraph.agent")
-        original = module._ask_jev
+        module = import_module("jevgraph.agent")
+        nodes = import_module("jevgraph.nodes")
+        original = nodes._ask_jev
 
         def fake_jev(_, questions):
             answers = {
@@ -20,11 +21,11 @@ class AnalystGraphTest(unittest.TestCase):
             }
             return {name: answers[name] for name in questions}
 
-        module._ask_jev = fake_jev
+        nodes._ask_jev = fake_jev
         try:
             result = module.agent.invoke({"messages": [{"role": "user", "content": "ambiguous"}]})
         finally:
-            module._ask_jev = original
+            nodes._ask_jev = original
 
         self.assertEqual(result["analyst"]["route"], "clarify")
         self.assertTrue(result["messages"][-1].content.startswith("Could you clarify"))

@@ -1,85 +1,32 @@
 import json
-import os
-from functools import lru_cache
-from typing import Any, Literal
+from typing import Any
 
-from dotenv import load_dotenv
-from langchain.chat_models import init_chat_model
 from langchain.messages import AIMessage, SystemMessage, ToolMessage
-from langchain.tools import tool
-from langgraph.graph import END, START, MessagesState, StateGraph
-from langsmith import traceable
-from typesafe_sdk import Choice, Noul, Score, TypeSafeClient
-from typing_extensions import TypedDict
+from typesafe_sdk import Choice, Noul, Score
 
-from tools import search_web
-
-load_dotenv()
-os.environ["LANGSMITH_GATEWAY"] = "true"
-
-analyst_instructions = """You are an analytical assistant.
-
-Use search_web when current or uncertain information is needed. Be clear about
-uncertainty, ground claims in tool results, and never invent sources or facts.
-"""
+from jevgraph.utils import (
+    AnalystState,
+    _ask_jev,
+    _merge,
+    _model,
+    _route_from_jev,
+    _snapshot,
+    _text,
+    analyst_instructions,
+    search_web_tool,
+    tools_by_name,
+)
 
 
-class AnalystState(MessagesState):
-    analyst: dict[str, Any]
-
-
-def _text(value: Any) -> str:
-    return value if isinstance(value, str) else str(value)
-
-
-def _request(state: AnalystState) -> str:
-    for message in reversed(state["messages"]):
-        if getattr(message, "type", None) == "human":
-            return _text(message.content)
-    return ""
-
-
-def _snapshot(state: AnalystState, **extra: Any) -> dict[str, Any]:
-    return {
-        "request": _request(state),
-        "messages": [_text(message.content) for message in state["messages"]],
-        "analyst": state.get("analyst", {}),
-        **extra,
-    }
-
-
-def _merge(state: AnalystState, **values: Any) -> dict[str, Any]:
-    return {"analyst": {**state.get("analyst", {}), **values}}
-
-
-def _route_from_jev(state: AnalystState, route: Any) -> str:
-    return "blocked" if state["analyst"]["is_safe"] < 0.5 else route.choice
-
-
-@traceable(name="analyst_jev")
-def _ask_jev(state: dict[str, Any], questions: dict[str, Any]) -> dict[str, Any]:
-    with TypeSafeClient() as client:
-        return client.system_one(state=state, questions=questions).answers
-
-
-search_web_tool = tool(search_web)
-tools_by_name = {search_web_tool.name: search_web_tool}
-
-
-@lru_cache
-def _model():
-    return init_chat_model(os.getenv("WEATHER_AGENT_MODEL", "openai:gpt-5.5"), temperature=0)
-
-
-def _blocked(_: AnalystState) -> dict[str, Any]:
+def blocked(_: AnalystState) -> dict[str, Any]:
     return {"messages": [AIMessage(content="I cannot help with that request.")]}
 
 
-def _clarify(_: AnalystState) -> dict[str, Any]:
+def clarify(_: AnalystState) -> dict[str, Any]:
     return {"messages": [AIMessage(content="Could you clarify what you would like me to research?")]}
 
 
-def _escalate(_: AnalystState) -> dict[str, Any]:
+def escalate(_: AnalystState) -> dict[str, Any]:
     return {"messages": [AIMessage(content="This request should be reviewed by a human or specialist.")]}
 
 
@@ -211,76 +158,40 @@ def evaluate_answer(state: AnalystState) -> dict[str, Any]:
     )
 
 
-def build_graph():
-    builder = StateGraph(AnalystState)
-    builder.add_node("classify", classify_request)
-    builder.add_node("model", call_model)
-    builder.add_node("tools", call_tools)
-    builder.add_node("blocked", _blocked)
-    builder.add_node("clarify", _clarify)
-    builder.add_node("escalate", _escalate)
-    builder.add_node("evaluate", evaluate_answer)
+def route_after_classify(state: AnalystState) -> str:
+    return _route_from_jev(
+        state,
+        _ask_jev(
+            _snapshot(state),
+            {
+                "route": Choice(
+                    instructions="Choose the best next action for this request.",
+                    criteria={
+                        "answer": "The agent can answer from its knowledge.",
+                        "search": "Current or missing information requires web search.",
+                        "clarify": "The request is ambiguous and needs clarification.",
+                        "escalate": "A human or specialist should handle the request.",
+                    },
+                ),
+            },
+        )["route"],
+    )
 
-    builder.add_conditional_edges(
-        "classify",
-        lambda state: _route_from_jev(
-            state,
-            _ask_jev(
-                _snapshot(state),
-                {
-                    "route": Choice(
-                        instructions="Choose the best next action for this request.",
-                        criteria={
-                            "answer": "The agent can answer from its knowledge.",
-                            "search": "Current or missing information requires web search.",
-                            "clarify": "The request is ambiguous and needs clarification.",
-                            "escalate": "A human or specialist should handle the request.",
-                        },
-                    ),
-                },
-            )["route"],
-        ),
+
+def route_after_model(state: AnalystState) -> str:
+    if not state["messages"][-1].tool_calls:
+        return "finish"
+    choice = _ask_jev(
+        _snapshot(state, selected_tools=[call["name"] for call in state["messages"][-1].tool_calls]),
         {
-            "answer": "model",
-            "search": "model",
-            "clarify": "clarify",
-            "escalate": "escalate",
-            "blocked": "blocked",
-        },
-    )
-    builder.add_edge(START, "classify")
-    builder.add_conditional_edges(
-        "model",
-        lambda state: (
-            "finish"
-            if not state["messages"][-1].tool_calls
-            else "tools"
-            if _ask_jev(
-                _snapshot(state, selected_tools=[call["name"] for call in state["messages"][-1].tool_calls]),
-                {
-                    "tool_selection": Choice(
-                        instructions="Classify whether the selected tools fit the user's request.",
-                        criteria={
-                            "appropriate": "The selected tools are the right next action.",
-                            "unnecessary": "The agent should answer without using a tool.",
-                            "wrong_tool": "A different tool or action is needed.",
-                        },
-                    )
+            "tool_selection": Choice(
+                instructions="Classify whether the selected tools fit the user's request.",
+                criteria={
+                    "appropriate": "The selected tools are the right next action.",
+                    "unnecessary": "The agent should answer without using a tool.",
+                    "wrong_tool": "A different tool or action is needed.",
                 },
-            )["tool_selection"].choice
-            != "unnecessary"
-            else "finish"
-        ),
-        {"tools": "tools", "finish": "evaluate"},
-    )
-    builder.add_edge("tools", "model")
-    builder.add_edge("clarify", "evaluate")
-    builder.add_edge("escalate", "evaluate")
-    builder.add_edge("evaluate", END)
-    builder.add_edge("blocked", END)
-    return builder.compile()
-
-
-agent = build_graph().with_config({"recursion_limit": 20})
-
-__all__ = ["AnalystState", "agent", "build_graph"]
+            )
+        },
+    )["tool_selection"].choice
+    return "finish" if choice == "unnecessary" else "tools"

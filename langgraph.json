@@ -1,15 +1,9 @@
 {
   "dependencies": [
-    "langchain",
-    "langchain-openai",
-    "langgraph",
-    "langsmith",
-    "python-dotenv",
-    "tavily-python",
-    "typesafe-sdk"
+    "."
   ],
   "graphs": {
-    "analyst": "./agent.py:agent"
+    "analyst": "./src/jevgraph/agent.py:agent"
   },
   "env": ".env"
 }
